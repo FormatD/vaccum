@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vacuum</string>
+    <string name="pick_host">Pick host audio</string>
+    <string name="no_host">none (watermark will be audible)</string>
+    <string name="payload_hint">payload as hex, e.g. 48656c6c6f</string>
+    <string name="play">Encode and play</string>
+    <string name="save">Save as .m4a</string>
+    <string name="receive">Record and decode</string>
+    <string name="decode_file">Decode from file</string>
+</resources>

@@ -1,0 +1,21 @@
+build/
+build-*/
+cmake-build-*/
+.cache/
+compile_commands.json
+
+# Android
+android/.gradle/
+android/local.properties
+android/**/build/
+android/.cxx/
+*.apk
+*.aab
+
+# Audio artefacts produced by the CLI and benchmarks
+*.wav
+*.mp3
+*.pcm
+!tests/fixtures/*.wav
+
+.DS_Store
