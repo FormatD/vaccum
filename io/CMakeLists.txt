@@ -12,9 +12,9 @@ set_target_properties(vacuum_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # libmp3lame is used for MP3 encoding. Optional: without it the CLI can still
 # read MP3 (via ffmpeg) and write WAV, and reports a clear error on encode.
 find_path(LAME_INCLUDE_DIR NAMES lame/lame.h
-  HINTS /opt/homebrew/include /usr/local/include /opt/local/include)
+  HINTS /opt/homebrew/include /usr/local/include /opt/local/include $ENV{HOME}/.local/include)
 find_library(LAME_LIBRARY NAMES mp3lame
-  HINTS /opt/homebrew/lib /usr/local/lib /opt/local/lib)
+  HINTS /opt/homebrew/lib /usr/local/lib /opt/local/lib $ENV{HOME}/.local/lib)
 
 if(LAME_INCLUDE_DIR AND LAME_LIBRARY)
   target_include_directories(vacuum_io PRIVATE ${LAME_INCLUDE_DIR})

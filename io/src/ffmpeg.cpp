@@ -89,8 +89,19 @@ std::string listInputDevices() {
 }
 
 bool readAudioFile(const std::string& path, Audio& out, int& sampleRateOut, std::string& error) {
+  std::string wavError;
+  if (readWav(path, out, sampleRateOut, wavError)) {
+    error.clear();
+    return true;
+  }
+
   if (!toolAvailable("ffprobe")) {
-    error = "ffprobe not found on PATH; install ffmpeg to decode this format";
+    if (wavError == "cannot open " + path ||
+        wavError.find("is not a RIFF/WAVE file") == std::string::npos) {
+      error = wavError;
+    } else {
+      error = "ffprobe not found on PATH; install ffmpeg to decode this format";
+    }
     return false;
   }
 
