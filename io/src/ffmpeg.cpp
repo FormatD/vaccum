@@ -141,7 +141,13 @@ bool readAudioFile(const std::string& path, Audio& out, int& sampleRateOut, std:
   return true;
 }
 
-bool captureMicrophone(double seconds, int sampleRate, Audio& out, std::string& error) {
+std::string defaultAudioInput() {
+  return defaultInputSpec();
+}
+
+bool captureMicrophone(double seconds, int sampleRate, Audio& out, std::string& error,
+                       CaptureProgressCallback onProgress) {
+  out.clear();
   if (seconds <= 0.0) {
     error = "capture duration must be positive; pass --seconds";
     return false;
@@ -172,18 +178,62 @@ bool captureMicrophone(double seconds, int sampleRate, Audio& out, std::string& 
       "ffmpeg -nostdin -v error -f " + format + " -i " + quote(device) + " -t " +
       std::to_string(seconds) + " -ac 1 -ar " + std::to_string(sampleRate) +
       " -f f32le -acodec pcm_f32le -";
-  std::string captured, captureError;
-  if (!runCommand(cmd, captured, captureError)) {
-    error = "microphone capture failed (" + format + " " + device + "): " + captureError;
+
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    error = "failed to spawn: " + cmd;
     return false;
   }
-  if (captured.size() < sizeof(float)) {
+
+  const std::size_t expectedSamples = static_cast<std::size_t>(seconds * sampleRate);
+  out.reserve(expectedSamples);
+
+  std::vector<std::uint8_t> byteBuffer;
+  byteBuffer.reserve(16384);
+  std::array<std::uint8_t, 16384> rawBytes{};
+
+  while (true) {
+    const std::size_t n = std::fread(rawBytes.data(), 1, rawBytes.size(), pipe);
+    if (n == 0) break;
+    byteBuffer.insert(byteBuffer.end(), rawBytes.begin(), rawBytes.begin() + n);
+
+    const std::size_t floatCount = byteBuffer.size() / sizeof(float);
+    if (floatCount > 0) {
+      const float* fptr = reinterpret_cast<const float*>(byteBuffer.data());
+      float chunkPeak = 0.0f;
+      for (std::size_t i = 0; i < floatCount; ++i) {
+        chunkPeak = std::max(chunkPeak, std::abs(fptr[i]));
+      }
+      out.insert(out.end(), fptr, fptr + floatCount);
+
+      const std::size_t remainder = byteBuffer.size() % sizeof(float);
+      if (remainder > 0) {
+        std::memmove(byteBuffer.data(), byteBuffer.data() + floatCount * sizeof(float), remainder);
+      }
+      byteBuffer.resize(remainder);
+
+      if (onProgress) {
+        CaptureProgress p;
+        p.elapsedSeconds = static_cast<double>(out.size()) / sampleRate;
+        p.totalSeconds = seconds;
+        p.currentPeak = chunkPeak;
+        p.samplesCaptured = out.size();
+        onProgress(p);
+      }
+    }
+  }
+
+  const int status = pclose(pipe);
+  if (status != 0) {
+    error = "microphone capture failed (" + format + " " + device + "): command exited with status " +
+            std::to_string(status);
+    return false;
+  }
+  if (out.empty()) {
     error = "microphone capture produced no audio; check the input device";
     return false;
   }
 
-  out.resize(captured.size() / sizeof(float));
-  std::memcpy(out.data(), captured.data(), out.size() * sizeof(float));
   error.clear();
   return true;
 }

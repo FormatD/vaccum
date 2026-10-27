@@ -18,4 +18,8 @@ android/.cxx/
 *.pcm
 !tests/fixtures/*.wav
 
+# Local session and data
+session.txt
+data/
+
 .DS_Store

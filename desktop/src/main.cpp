@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -14,6 +15,14 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#define isatty _isatty
+#define fileno _fileno
+#else
+#include <unistd.h>
+#endif
 
 #include "vacuum/frame.h"
 #include "vacuum/ss_modem.h"
@@ -46,6 +55,7 @@ struct Args {
   double offsetSeconds = 0.0;
   std::string saveWav;  // mic: keep the capture so it can be decoded again offline
   bool noSoftErasure = false;
+  bool salvage = false;
   bool quiet = false;
 };
 
@@ -76,6 +86,7 @@ void usage() {
       "                        knob, and cheaper in airtime than shrinking this)\n"
       "  --stream-id N         receiver ignores frames from any other stream\n"
       "  --no-soft-erasure     disable the confidence-ranked erasure retry\n"
+      "  --salvage             export recovered fragments even if message is incomplete\n"
       "\n"
       "Modem options:\n"
       "  --low-hz HZ           bottom of the carrier band (default 1100)\n"
@@ -206,6 +217,7 @@ Args parseArgs(int argc, char** argv) {
     else if (k == "--offset") a.offsetSeconds = std::atof(next(i).c_str());
     else if (k == "--save-wav") a.saveWav = next(i);
     else if (k == "--no-soft-erasure") a.noSoftErasure = true;
+    else if (k == "--salvage") a.salvage = true;
     else if (k == "--quiet") a.quiet = true;
     else if (k == "-h" || k == "--help") {
       usage();
@@ -322,9 +334,18 @@ int cmdWatermark(const Args& a) {
   return 0;
 }
 
-void reportDecode(const DecodeResult& dec, const Args& a) {
+void reportDecode(const DecodeResult& dec, const Args& a, int sampleRate = 0) {
   if (a.quiet) return;
-  std::printf("sync      %s, score %.3f\n", dec.synced ? "found" : "not found", dec.syncScore);
+  if (dec.synced) {
+    if (sampleRate > 0 && dec.syncSample >= 0) {
+      std::printf("sync      found at %.2f s (sample %td), score %.3f\n",
+                  static_cast<double>(dec.syncSample) / sampleRate, dec.syncSample, dec.syncScore);
+    } else {
+      std::printf("sync      found, score %.3f\n", dec.syncScore);
+    }
+  } else {
+    std::printf("sync      not found, score %.3f\n", dec.syncScore);
+  }
   // The framing comes from the physical header, so it is reported even when
   // the payload did not -- a wrong --parity shows up here as a block count that
   // does not add up, which is a far faster diagnosis than a bare failure.
@@ -339,14 +360,17 @@ void reportDecode(const DecodeResult& dec, const Args& a) {
 
 /// Send the payload where the user asked for it, or hex-dump it so the command
 /// is useful without a destination file.
-void emitPayload(const Bytes& payload, const Args& a) {
+void emitPayload(const Bytes& payload, const Args& a, bool isPartial = false) {
   if (a.out.empty()) {
     std::printf("%s\n", toHex(payload).c_str());
     return;
   }
   std::string error;
   if (!writeDataFile(a.out, payload, error)) fail(error);
-  if (!a.quiet) std::printf("payload   %zu B -> %s\n", payload.size(), a.out.c_str());
+  if (!a.quiet) {
+    std::printf("payload   %zu B%s -> %s\n", payload.size(),
+                isPartial ? " (salvaged)" : "", a.out.c_str());
+  }
 }
 
 int cmdExtract(const Args& a) {
@@ -356,9 +380,13 @@ int cmdExtract(const Args& a) {
   const SpreadModem modem(cfg);
 
   const auto dec = decodeMessage(rx, modem, makeTransmitConfig(a));
-  reportDecode(dec, a);
+  reportDecode(dec, a, cfg.sampleRate);
   if (!dec.ok) {
     std::fprintf(stderr, "vacuum: %s\n", dec.error.c_str());
+    if (a.salvage && !dec.salvagePayload.empty()) {
+      emitPayload(dec.salvagePayload, a, /*isPartial=*/true);
+      return 0;
+    }
     return 1;
   }
   emitPayload(dec.payload, a);
@@ -375,9 +403,9 @@ int cmdMic(const Args& a) {
   const SpreadConfig cfg = makeSpreadConfig(a);
   const SpreadModem modem(cfg);
 
-  Audio rx;
-  std::string error;
+  const std::string inputSpec = io::defaultAudioInput();
   if (!a.quiet) {
+    std::printf("input     %s\n", inputSpec.c_str());
     // Measured here: `mic --seconds 2` blocked for two minutes and returned
     // nothing. macOS gates the microphone behind a consent prompt aimed at the
     // calling terminal, which never appears in a headless shell, so name the
@@ -386,8 +414,64 @@ int cmdMic(const Args& a) {
                 a.seconds, cfg.sampleRate);
     std::fflush(stdout);
   }
-  if (!io::captureMicrophone(a.seconds, cfg.sampleRate, rx, error)) fail(error);
-  if (!a.quiet) std::printf("captured  %.2f s\n", static_cast<double>(rx.size()) / cfg.sampleRate);
+
+  const bool isTty = isatty(fileno(stdout)) != 0;
+  auto lastProgressTime = std::chrono::steady_clock::now();
+  double lastLoggedSec = 0.0;
+
+  io::CaptureProgressCallback onProgress = nullptr;
+  if (!a.quiet) {
+    onProgress = [&](const io::CaptureProgress& p) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto elapsedMs =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - lastProgressTime).count();
+      if (isTty) {
+        if (elapsedMs >= 150 || p.elapsedSeconds >= p.totalSeconds) {
+          lastProgressTime = now;
+          std::printf("\rrecording %.1f / %.1f s (peak %.3f)...", p.elapsedSeconds, p.totalSeconds,
+                      p.currentPeak);
+          std::fflush(stdout);
+        }
+      } else {
+        if (p.elapsedSeconds - lastLoggedSec >= 2.0 || p.elapsedSeconds >= p.totalSeconds) {
+          lastLoggedSec = p.elapsedSeconds;
+          std::printf("recording %.1f / %.1f s (peak %.3f)\n", p.elapsedSeconds, p.totalSeconds,
+                      p.currentPeak);
+          std::fflush(stdout);
+        }
+      }
+    };
+  }
+
+  Audio rx;
+  std::string error;
+  if (!io::captureMicrophone(a.seconds, cfg.sampleRate, rx, error, onProgress)) {
+    if (!a.quiet && isTty) std::printf("\n");
+    fail(error);
+  }
+  if (!a.quiet && isTty) {
+    std::printf("\rrecording %.1f / %.1f s [done]               \n", a.seconds, a.seconds);
+  }
+
+  if (!a.quiet) {
+    float peak = 0.0f;
+    double sumSq = 0.0;
+    for (float s : rx) {
+      const float absVal = std::abs(s);
+      if (absVal > peak) peak = absVal;
+      sumSq += static_cast<double>(s) * s;
+    }
+    const float rms = rx.empty() ? 0.0f : static_cast<float>(std::sqrt(sumSq / rx.size()));
+    const double capturedSec = static_cast<double>(rx.size()) / cfg.sampleRate;
+    std::printf("captured  %.2f s (%zu samples, peak %.3f, rms %.3f)\n", capturedSec, rx.size(),
+                peak, rms);
+    if (peak < 0.005f) {
+      std::printf("warning   capture is near silent (peak %.4f); check mic input device or volume\n",
+                  peak);
+    } else if (peak >= 0.999f) {
+      std::printf("warning   capture may be clipping (peak %.3f); lower input volume\n", peak);
+    }
+  }
 
   if (!a.saveWav.empty()) {
     // Float32 rather than Int16: a capture is evidence, and quantising it would
@@ -396,10 +480,19 @@ int cmdMic(const Args& a) {
     if (!a.quiet) std::printf("saved     %s\n", a.saveWav.c_str());
   }
 
+  if (!a.quiet) {
+    std::printf("decoding  correlating preamble sync...\n");
+    std::fflush(stdout);
+  }
+
   const auto dec = decodeMessage(rx, modem, makeTransmitConfig(a));
-  reportDecode(dec, a);
+  reportDecode(dec, a, cfg.sampleRate);
   if (!dec.ok) {
     std::fprintf(stderr, "vacuum: %s\n", dec.error.c_str());
+    if (a.salvage && !dec.salvagePayload.empty()) {
+      emitPayload(dec.salvagePayload, a, /*isPartial=*/true);
+      return 0;
+    }
     return 1;
   }
   emitPayload(dec.payload, a);

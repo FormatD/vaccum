@@ -129,6 +129,7 @@ bool Reassembler::add(const Bytes& b) {
     fragmentCount_ = fragmentCount;
     totalPayloadLen_ = totalLen;
     payloadCrc_ = totalCrc;
+    fragSize_ = bodyLen - kFrameHeaderSize;
     fragments_.assign(fragmentCount, Bytes{});
     seen_.assign(fragmentCount, 0);
   }
@@ -164,6 +165,33 @@ std::vector<std::size_t> Reassembler::missingFragments() const {
   std::vector<std::size_t> out;
   for (std::size_t i = 0; i < seen_.size(); ++i) {
     if (!seen_[i]) out.push_back(i);
+  }
+  return out;
+}
+
+Bytes Reassembler::salvage() const {
+  if (!started_ || received_ == 0) return {};
+  if (complete_) return payload_;
+
+  const std::size_t fragSize = fragSize_ > 0 ? fragSize_ : 64;
+  std::size_t maxEnd = 0;
+  for (std::size_t i = 0; i < fragments_.size(); ++i) {
+    if (seen_[i] && !fragments_[i].empty()) {
+      maxEnd = std::max(maxEnd, i * fragSize + fragments_[i].size());
+    }
+  }
+  if (maxEnd == 0) return {};
+  if (totalPayloadLen_ > 0 && maxEnd > totalPayloadLen_) maxEnd = totalPayloadLen_;
+
+  Bytes out(maxEnd, 0);
+  for (std::size_t i = 0; i < fragments_.size(); ++i) {
+    if (seen_[i] && !fragments_[i].empty()) {
+      const std::size_t start = i * fragSize;
+      if (start < out.size()) {
+        const std::size_t len = std::min(fragments_[i].size(), out.size() - start);
+        std::copy(fragments_[i].begin(), fragments_[i].begin() + len, out.begin() + start);
+      }
+    }
   }
   return out;
 }

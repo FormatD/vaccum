@@ -54,6 +54,11 @@ std::vector<std::pair<double, std::ptrdiff_t>> correlateTopOffsets(
 
   const float invM = 1.0f / static_cast<float>(m);
 
+  std::vector<double> cumEnergy(rx.size() + 1, 0.0);
+  for (std::size_t i = 0; i < rx.size(); ++i) {
+    cumEnergy[i + 1] = cumEnergy[i] + static_cast<double>(rx[i]) * rx[i];
+  }
+
   for (std::size_t base = 0; base <= maxLag; base += step) {
     const std::size_t lags = std::min(step, maxLag - base + 1);
     std::fill(a.begin(), a.end(), Complex(0.0f, 0.0f));
@@ -68,7 +73,10 @@ std::vector<std::pair<double, std::ptrdiff_t>> correlateTopOffsets(
       const double re = static_cast<double>(a[tau].real()) * invM;
       const double im = static_cast<double>(a[tau].imag()) * invM;
       const double mag = std::sqrt(re * re + im * im);
-      insertCandidate(best, {mag, static_cast<std::ptrdiff_t>(base + tau)}, k, minSeparation);
+      const double windowEnergy = cumEnergy[base + tau + refLen] - cumEnergy[base + tau];
+      const double norm = std::sqrt(std::max(1e-12, windowEnergy));
+      const double score = mag / norm;
+      insertCandidate(best, {score, static_cast<std::ptrdiff_t>(base + tau)}, k, minSeparation);
     }
   }
   return best;

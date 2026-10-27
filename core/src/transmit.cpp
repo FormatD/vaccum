@@ -11,10 +11,48 @@
 namespace vacuum {
 namespace {
 
-/// Vote on each byte position across the repeated physical headers.
+/// Vote on physical header across repeats, checking CRC-16 and bit-level consensus.
 std::optional<PhysicalHeader> voteHeader(const Bytes& bytes, int repeat) {
   if (static_cast<int>(bytes.size()) < repeat * 4) return std::nullopt;
 
+  // 1. Check if any repeat candidate directly passes CRC-16
+  std::vector<std::pair<Bytes, int>> validCandidates;
+  for (int r = 0; r < repeat; ++r) {
+    Bytes cand(bytes.begin() + r * 4, bytes.begin() + (r + 1) * 4);
+    if (decodePhysicalHeader(cand).has_value()) {
+      auto it = std::find_if(validCandidates.begin(), validCandidates.end(),
+                             [&](const auto& p) { return p.first == cand; });
+      if (it != validCandidates.end()) {
+        it->second++;
+      } else {
+        validCandidates.push_back({cand, 1});
+      }
+    }
+  }
+  if (!validCandidates.empty()) {
+    auto best = std::max_element(validCandidates.begin(), validCandidates.end(),
+                                 [](const auto& a, const auto& b) { return a.second < b.second; });
+    return decodePhysicalHeader(best->first);
+  }
+
+  // 2. Bit-by-bit majority voting
+  Bytes bitVoted(4, 0);
+  for (int b = 0; b < 32; ++b) {
+    const int byteIdx = b / 8;
+    const int bitShift = 7 - (b % 8);
+    int ones = 0;
+    for (int r = 0; r < repeat; ++r) {
+      if ((bytes[r * 4 + byteIdx] >> bitShift) & 1) ++ones;
+    }
+    if (ones * 2 >= repeat) {
+      bitVoted[byteIdx] |= static_cast<std::uint8_t>(1 << bitShift);
+    }
+  }
+  if (auto h = decodePhysicalHeader(bitVoted); h.has_value()) {
+    return h;
+  }
+
+  // 3. Fallback to byte tally
   Bytes voted(4, 0);
   for (int i = 0; i < 4; ++i) {
     std::array<int, 256> tally{};
@@ -96,6 +134,7 @@ DecodeResult decodeMessage(const Audio& rx, const Modem& modem, const TransmitCo
 
   const auto extraction = modem.extract(rx);
   result.synced = extraction.synced;
+  result.syncSample = extraction.syncSample;
   result.syncScore = extraction.syncScore;
   if (!extraction.synced) {
     result.error = "acquisition preamble not found";
@@ -190,16 +229,19 @@ DecodeResult decodeMessage(const Audio& rx, const Modem& modem, const TransmitCo
     result.ok = true;
     result.payload = reassembler.payload();
     result.error.clear();
-  } else if (result.error.empty()) {
-    // The reassembler only learns the total from a decoded start frame, so when
-    // every block failed it still says zero. The physical header was readable --
-    // that is what `framesExpected` holds -- and "0 of 2" is a diagnosis where
-    // "0 of 0" is not.
-    const std::size_t expected =
-        reassembler.fragmentsExpected() > 0 ? reassembler.fragmentsExpected()
-                                            : result.framesExpected;
-    result.error = "incomplete message: " + std::to_string(result.framesRecovered) + "/" +
-                   std::to_string(expected) + " fragments recovered";
+  } else {
+    result.salvagePayload = reassembler.salvage();
+    if (result.error.empty()) {
+      // The reassembler only learns the total from a decoded start frame, so when
+      // every block failed it still says zero. The physical header was readable --
+      // that is what `framesExpected` holds -- and "0 of 2" is a diagnosis where
+      // "0 of 0" is not.
+      const std::size_t expected =
+          reassembler.fragmentsExpected() > 0 ? reassembler.fragmentsExpected()
+                                              : result.framesExpected;
+      result.error = "incomplete message: " + std::to_string(result.framesRecovered) + "/" +
+                     std::to_string(expected) + " fragments recovered";
+    }
   }
   return result;
 }

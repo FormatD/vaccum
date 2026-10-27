@@ -127,6 +127,7 @@ struct DecodeResult {
   std::string error;
 
   bool synced = false;
+  std::ptrdiff_t syncSample = -1;
   double syncScore = 0;
   double meanBitConfidence = 0;
 
@@ -140,6 +141,9 @@ struct DecodeResult {
   int rsCorrectedSymbols = 0;
   int rsErasedSymbols = 0;
   int rsFailedBlocks = 0;
+
+  /// Partial payload salvaged from recovered fragments when full message CRC fails.
+  Bytes salvagePayload;
 };
 
 /// Decode a recording. Fails cleanly (ok == false, error set) rather than

@@ -76,6 +76,7 @@ class Reassembler {
   std::size_t fragmentsReceived() const noexcept { return received_; }
   std::size_t fragmentsExpected() const noexcept { return fragmentCount_; }
   std::vector<std::size_t> missingFragments() const;
+  Bytes salvage() const;
 
   void reset() noexcept;
 
@@ -86,6 +87,7 @@ class Reassembler {
   std::size_t fragmentCount_ = 0;
   std::size_t received_ = 0;
   std::size_t totalPayloadLen_ = 0;
+  std::size_t fragSize_ = 0;
   std::uint32_t payloadCrc_ = 0;
   std::vector<Bytes> fragments_;
   std::vector<char> seen_;
